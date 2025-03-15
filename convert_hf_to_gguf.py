@@ -490,6 +490,18 @@ class Model:
         except KeyError:
             raise NotImplementedError(f'Architecture {arch!r} not supported!') from None
 
+    @classmethod
+    def from_model_architecture(cls, arch: str) -> type[Model]:
+        try:
+            return cls._model_classes[arch]
+        except KeyError:
+            # Check for partial matches or common variations of model names
+            for registered_arch, model_class in cls._model_classes.items():
+                # Add check for Ovis2 model
+                if arch.lower().startswith("ovis") and registered_arch.lower().startswith("ovis"):
+                    return model_class
+            raise NotImplementedError(f'Architecture {arch!r} not supported!') from None
+        
     def does_token_look_special(self, token: str | bytes) -> bool:
         if isinstance(token, (bytes, bytearray)):
             token_text = token.decode(encoding="utf-8")
@@ -952,8 +964,122 @@ class Model:
             self.gguf_writer.add_add_bos_token(field.parts[-1].tolist()[0])
         if (field := vocab_reader.get_field(gguf.Keys.Tokenizer.ADD_EOS)) is not None:
             self.gguf_writer.add_add_eos_token(field.parts[-1].tolist()[0])
+            
+@Model.register("Ovis")
+class OvisModel(Model):
+    model_arch = gguf.MODEL_ARCH.LLAMA
+    has_vision: bool = True
 
+    def __init__(self, *args, **kwargs):
+        dir_model = kwargs["dir_model"]
+        hparams = Model.load_hparams(dir_model)
+        
+        # Merge llm_config into the root level of hparams
+        if "llm_config" in hparams:
+            # Keep original parameters but prioritize llm_config values
+            merged_hparams = {**hparams, **hparams["llm_config"]}
+            kwargs["hparams"] = merged_hparams
+        
+        super().__init__(*args, **kwargs)
+        
+    def set_vocab(self):
+        # For Ovis, the tokenizer is likely in the llm_config's _name_or_path
+        tokenizer_path = self.hparams.get("_name_or_path")
+        if tokenizer_path:
+            logger.info(f"Using tokenizer from: {tokenizer_path}")
+            try:
+                from transformers import AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+                
+                # Extract tokens and add to GGUF
+                tokens = []
+                scores = []
+                toktypes = []
+                
+                vocab = tokenizer.get_vocab()
+                for token, token_id in sorted(vocab.items(), key=lambda x: x[1]):
+                    tokens.append(token.encode('utf-8'))
+                    scores.append(-1000.0)  # Default score
+                    
+                    # Determine token type
+                    if token_id in tokenizer.all_special_ids:
+                        toktypes.append(gguf.TokenType.CONTROL)
+                    else:
+                        toktypes.append(gguf.TokenType.NORMAL)
+                
+                self.gguf_writer.add_tokenizer_model("llama")
+                self.gguf_writer.add_tokenizer_pre("default")
+                self.gguf_writer.add_token_list(tokens)
+                self.gguf_writer.add_token_scores(scores)
+                self.gguf_writer.add_token_types(toktypes)
+                
+                # Add special tokens
+                if hasattr(tokenizer, "bos_token_id") and tokenizer.bos_token_id is not None:
+                    self.gguf_writer.add_bos_token_id(tokenizer.bos_token_id)
+                if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
+                    self.gguf_writer.add_eos_token_id(tokenizer.eos_token_id)
+                
+                logger.info(f"Successfully loaded tokenizer with {len(tokens)} tokens")
+            except Exception as e:
+                logger.error(f"Error loading tokenizer: {e}")
+                # Fallback to GPT-2 tokenizer
+                self._set_vocab_gpt2()
+        else:
+            # Fallback to GPT-2 tokenizer
+            self._set_vocab_gpt2()
+        
+    def set_gguf_parameters(self):
+        block_count = self.hparams["num_hidden_layers"]
+        head_count = self.hparams["num_attention_heads"]
+        head_count_kv = self.hparams.get("num_key_value_heads", head_count)
+        
+        self.gguf_writer.add_context_length(self.hparams.get("max_position_embeddings", 32768))
+        self.gguf_writer.add_embedding_length(self.hparams["hidden_size"])
+        self.gguf_writer.add_block_count(block_count)
+        self.gguf_writer.add_feed_forward_length(self.hparams["intermediate_size"])
+        self.gguf_writer.add_head_count(head_count)
+        self.gguf_writer.add_head_count_kv(head_count_kv)
+        self.gguf_writer.add_layer_norm_rms_eps(self.hparams.get("rms_norm_eps", 1e-6))
+        self.gguf_writer.add_file_type(self.ftype)
+        
+        if "rope_theta" in self.hparams:
+            self.gguf_writer.add_rope_freq_base(self.hparams["rope_theta"])
+            
+        if self.hparams.get("rope_scaling") is not None:
+            if self.hparams["rope_scaling"].get("type") == "linear":
+                self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.LINEAR)
+                self.gguf_writer.add_rope_scaling_factor(self.hparams["rope_scaling"]["factor"])
+                
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Handle specific tensor name mappings for Ovis model
+        if name == "llm.lm_head.weight":
+            return [(self.format_tensor_name(gguf.MODEL_TENSOR.OUTPUT), data_torch)]
+        elif name == "vte.weight":
+            return [(f"vte.weight", data_torch)]
+        elif name.startswith("llm."):
+            name = name[4:]  # Remove "llm." prefix
+        elif name.startswith(("vision_tower.", "visual_tokenizer.")):
+            name = f"vision.{name}"
+        elif name.startswith("multi_modal_projector."):
+            name = f"mm_proj.{name}"
 
+        # Ensure tensor name does not exceed 64 characters
+        if len(name) >= 64:
+            logger.warning(f"Truncating tensor name: {name} -> {name[:63]}")
+            name = name[:63]  # Truncate to 63 characters max (64 including null terminator)
+
+        try:
+            mapped_name = self.map_tensor_name(name)
+            return [(mapped_name, data_torch)]
+        except ValueError:
+            logger.info(f"Keeping unmapped tensor: {name}")
+            return [(name, data_torch)]
+            
+    def write(self):
+        super().write()
+        logger.info("NOTE: This GGUF file contains both language and vision components of the Ovis model")
+        logger.info("      To use only the language model part in llama.cpp, you may need to ignore vision tensors")
+    
 @Model.register("GPTNeoXForCausalLM")
 class GPTNeoXModel(Model):
     model_arch = gguf.MODEL_ARCH.GPTNEOX
