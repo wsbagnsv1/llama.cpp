@@ -814,7 +814,7 @@ class Model:
 
         special_vocab = gguf.SpecialVocab(self.dir_model, n_vocab=len(tokens))
         special_vocab.add_to_gguf(self.gguf_writer)
-
+    
     def _create_vocab_sentencepiece(self):
         from sentencepiece import SentencePieceProcessor
 
@@ -974,113 +974,165 @@ class OvisModel(Model):
         dir_model = kwargs["dir_model"]
         hparams = Model.load_hparams(dir_model)
         
-        # Merge llm_config into the root level of hparams
         if "llm_config" in hparams:
-            # Keep original parameters but prioritize llm_config values
             merged_hparams = {**hparams, **hparams["llm_config"]}
             kwargs["hparams"] = merged_hparams
         
         super().__init__(*args, **kwargs)
-        
+        self.original_vocab_size = None
+        self.padded_vocab_size = None
+
     def set_vocab(self):
-        # For Ovis, the tokenizer is likely in the llm_config's _name_or_path
-        tokenizer_path = self.hparams.get("_name_or_path")
-        if tokenizer_path:
-            logger.info(f"Using tokenizer from: {tokenizer_path}")
-            try:
-                from transformers import AutoTokenizer
-                tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-                
-                # Extract tokens and add to GGUF
-                tokens = []
-                scores = []
-                toktypes = []
-                
-                vocab = tokenizer.get_vocab()
-                for token, token_id in sorted(vocab.items(), key=lambda x: x[1]):
-                    tokens.append(token.encode('utf-8'))
-                    scores.append(-1000.0)  # Default score
-                    
-                    # Determine token type
-                    if token_id in tokenizer.all_special_ids:
-                        toktypes.append(gguf.TokenType.CONTROL)
-                    else:
-                        toktypes.append(gguf.TokenType.NORMAL)
-                
-                self.gguf_writer.add_tokenizer_model("llama")
-                self.gguf_writer.add_tokenizer_pre("default")
-                self.gguf_writer.add_token_list(tokens)
-                self.gguf_writer.add_token_scores(scores)
-                self.gguf_writer.add_token_types(toktypes)
-                
-                # Add special tokens
-                if hasattr(tokenizer, "bos_token_id") and tokenizer.bos_token_id is not None:
-                    self.gguf_writer.add_bos_token_id(tokenizer.bos_token_id)
-                if hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None:
-                    self.gguf_writer.add_eos_token_id(tokenizer.eos_token_id)
-                
-                logger.info(f"Successfully loaded tokenizer with {len(tokens)} tokens")
-            except Exception as e:
-                logger.error(f"Error loading tokenizer: {e}")
-                # Fallback to GPT-2 tokenizer
-                self._set_vocab_gpt2()
-        else:
-            # Fallback to GPT-2 tokenizer
+        try:
+            self._set_vocab_sentencepiece()
+        except FileNotFoundError:
             self._set_vocab_gpt2()
-        
-    def set_gguf_parameters(self):
-        block_count = self.hparams["num_hidden_layers"]
-        head_count = self.hparams["num_attention_heads"]
-        head_count_kv = self.hparams.get("num_key_value_heads", head_count)
-        
-        self.gguf_writer.add_context_length(self.hparams.get("max_position_embeddings", 32768))
-        self.gguf_writer.add_embedding_length(self.hparams["hidden_size"])
-        self.gguf_writer.add_block_count(block_count)
-        self.gguf_writer.add_feed_forward_length(self.hparams["intermediate_size"])
-        self.gguf_writer.add_head_count(head_count)
-        self.gguf_writer.add_head_count_kv(head_count_kv)
-        self.gguf_writer.add_layer_norm_rms_eps(self.hparams.get("rms_norm_eps", 1e-6))
-        self.gguf_writer.add_file_type(self.ftype)
-        
-        if "rope_theta" in self.hparams:
-            self.gguf_writer.add_rope_freq_base(self.hparams["rope_theta"])
-            
-        if self.hparams.get("rope_scaling") is not None:
-            if self.hparams["rope_scaling"].get("type") == "linear":
-                self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.LINEAR)
-                self.gguf_writer.add_rope_scaling_factor(self.hparams["rope_scaling"]["factor"])
-                
+
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        # Handle specific tensor name mappings for Ovis model
+        # Handle embeddings
+        if name == "model.embed_tokens.weight":
+            if not all([self.original_vocab_size, self.padded_vocab_size]):
+                raise ValueError("Vocabulary sizes not initialized")
+            
+            if data_torch.shape[0] < self.padded_vocab_size:
+                padding = torch.zeros((self.padded_vocab_size - data_torch.shape[0], data_torch.shape[1]), 
+                                    dtype=data_torch.dtype, device=data_torch.device)
+                data_torch = torch.cat([data_torch, padding], dim=0)
+            
+            return [(self.format_tensor_name(gguf.MODEL_TENSOR.TOKEN_EMBD), data_torch)]
+        
+        # Output layers
         if name == "llm.lm_head.weight":
             return [(self.format_tensor_name(gguf.MODEL_TENSOR.OUTPUT), data_torch)]
-        elif name == "vte.weight":
-            return [(f"vte.weight", data_torch)]
+        
+        if name == "vte.weight":
+            return [("clip.vision.mm_proj.output.weight", data_torch)]
+        
+        # Tensor processing
+        processed_name = name
+        # Enhanced vision component handling
+        if name.startswith("visual_tokenizer.backbone"):
+            processed_name = name.replace("visual_tokenizer", "clip.vision.model")  # Updated prefix
         elif name.startswith("llm."):
-            name = name[4:]  # Remove "llm." prefix
+            processed_name = name[4:]
         elif name.startswith(("vision_tower.", "visual_tokenizer.")):
-            name = f"vision.{name}"
+            processed_name = name.replace("visual_tokenizer", "clip.vision.model")  # Updated prefix
         elif name.startswith("multi_modal_projector."):
-            name = f"mm_proj.{name}"
+            processed_name = f"clip.vision.mm_proj.{name}"  # Adjusted prefix
+        
+        # Apply specific vision encoder transformations
+        processed_name = processed_name\
+            .replace("preprocessor.patchifier", "patch_embd")\
+            .replace("backbone", "bb")\
+            .replace("trunk", "t")\
+            .replace("blocks", "b")\
+            .replace("pre_patch.norm", "patch_embd.norm")\
+            .replace("pre_patch.proj", "patch_embd.proj")\
+            .replace("position_embedding", "pos_embd")\
+            .replace("attn.proj", "attn_out")\
+            .replace("attn.qkv", "attn_qkv")  # Handle combined QKV tensors
 
-        # Ensure tensor name does not exceed 64 characters
-        if len(name) >= 64:
-            logger.warning(f"Truncating tensor name: {name} -> {name[:63]}")
-            name = name[:63]  # Truncate to 63 characters max (64 including null terminator)
+        # Handle multi-block layers
+        if "t.b." in processed_name:
+            processed_name = processed_name.replace("t.b.", "blk.")
+            
+        # Handle specific unmapped tensors
+        if processed_name in [
+            "clip.vision.model.bb.patch_embd.norm.weight",
+            "clip.vision.model.bb.patch_embd.proj.bias",
+            "clip.vision.model.bb.patch_embd.proj.weight"
+        ]:
+            return [(processed_name, data_torch)]
+            
+        # Handle position embedding tensor
+        if processed_name == "clip.vision.model.bb.preprocessor.pos_embed":
+            return [("clip.vision.model.bb.pos_embd", data_torch)]
+            
+        # Handle post-transformer normalization
+        if processed_name == "clip.vision.model.bb.t.post_t_norm.weight":
+            return [(processed_name, data_torch)]
+            
+        # Handle vision model head layers
+        if processed_name.startswith("clip.vision.model.head."):
+            return [(processed_name, data_torch)]
+            
+        # Handle attention output weights in blocks
+        if "clip.vision.model.bb.blk." in processed_name:
+            # Handle MLP layers in vision blocks
+            if processed_name.endswith((".mlp.fc1.weight", ".mlp.fc2.weight", ".mlp.fc3.weight")):
+                return [(processed_name, data_torch)]
+                
+            # Handle normalization layers in vision blocks
+            if processed_name.endswith((".norm_1.weight", ".norm_2.weight")):
+                return [(processed_name, data_torch)]
+                
+            # Handle attention output weights
+            if processed_name.endswith(".attn_out.weight"):
+                return [(processed_name, data_torch)]
 
+        # Name collision prevention (updated reserved names)
+        reserved_names = {
+            self.format_tensor_name(gguf.MODEL_TENSOR.OUTPUT),
+            "clip.vision.mm_proj.output.weight"
+        }
+        
         try:
-            mapped_name = self.map_tensor_name(name)
+            mapped_name = self.map_tensor_name(processed_name)
+            if mapped_name in reserved_names:
+                logger.info(f"Skipping reserved tensor: {processed_name}")
+                return []
+        except ValueError:
+            pass
+
+        # Truncation handling
+        if len(processed_name) >= 64:
+            processed_name = processed_name[:63]
+            logger.warning(f"Truncated tensor name: {processed_name}")
+
+        # Final mapping with vision-specific format
+        try:
+            # Handle QKV split if needed
+            if "attn_qkv" in processed_name:
+                c3, _ = data_torch.shape
+                assert c3 % 3 == 0
+                c = c3 // 3
+                wq = data_torch[:c]
+                wk = data_torch[c:2*c]
+                wv = data_torch[2*c:]
+                return [
+                    (processed_name.replace("attn_qkv", "attn_q"), wq),
+                    (processed_name.replace("attn_qkv", "attn_k"), wk),
+                    (processed_name.replace("attn_qkv", "attn_v"), wv)
+                ]
+            
+            mapped_name = self.map_tensor_name(processed_name)
+            if mapped_name in self.gguf_writer.tensors:
+                raise ValueError(f"Duplicate tensor {mapped_name}")
             return [(mapped_name, data_torch)]
         except ValueError:
-            logger.info(f"Keeping unmapped tensor: {name}")
-            return [(name, data_torch)]
-            
+            logger.info(f"Unmapped tensor kept: {processed_name}")
+            return [(processed_name, data_torch)]
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+
+        # Vision parameters
+        if "vision_config" in self.hparams:
+            vc = self.hparams["vision_config"]
+            self.gguf_writer.add_uint32("clip.vision.image_size", vc.get("image_size", 336))
+            self.gguf_writer.add_uint32("clip.vision.patch_size", vc.get("patch_size", 14))
+            self.gguf_writer.add_uint32("clip.vision.hidden_size", vc.get("hidden_size", 1024))
+            self.gguf_writer.add_uint32("clip.vision.projection_dim", self.hparams["llm_config"]["hidden_size"])
+
     def write(self):
         super().write()
-        logger.info("NOTE: This GGUF file contains both language and vision components of the Ovis model")
-        logger.info("      To use only the language model part in llama.cpp, you may need to ignore vision tensors")
-    
+        logger.info("Multimodal model converted successfully")
+        logger.info(f"Embedding dimensions: {self.padded_vocab_size} × {self.hparams['hidden_size']}")
+
+
+
 @Model.register("GPTNeoXForCausalLM")
+
 class GPTNeoXModel(Model):
     model_arch = gguf.MODEL_ARCH.GPTNEOX
 
