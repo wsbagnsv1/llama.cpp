@@ -497,8 +497,8 @@ class Model:
         except KeyError:
             # Check for partial matches or common variations of model names
             for registered_arch, model_class in cls._model_classes.items():
-                # Add check for 2 model
-                if arch.lower().startswith("") and registered_arch.lower().startswith(""):
+                # Add check for Ovis2 model
+                if arch.lower().startswith("ovis") and registered_arch.lower().startswith("ovis"):
                     return model_class
             raise NotImplementedError(f'Architecture {arch!r} not supported!') from None
         
@@ -1182,6 +1182,13 @@ class OvisModel(Model):
 
         # Truncation handling
         if len(processed_name) >= 64:
+            logger.warning(f"Long tensor name detected: {processed_name}")
+            # Instead of truncating, create a hash-based name that's unique but shorter
+            import hashlib
+            name_hash = hashlib.md5(processed_name.encode()).hexdigest()[:8]
+            base_name = processed_name.split('.')[-1]  # Get the last part of the name
+            processed_name = f"tensor.{name_hash}.{base_name}"
+            logger.warning(f"Renamed to: {processed_name}")
             processed_name = processed_name[:63]
             logger.warning(f"Truncated tensor name: {processed_name}")
 
@@ -1267,8 +1274,11 @@ class OvisModel(Model):
 
 
 
-@Model.register("GPTNeoXForCausalLM")
 
+
+
+
+@Model.register("GPTNeoXForCausalLM")
 class GPTNeoXModel(Model):
     model_arch = gguf.MODEL_ARCH.GPTNEOX
 
