@@ -49,8 +49,10 @@ struct diffusion_params {
     int32_t block_length     = 0;      // Block size (for block scheduling)
     float   alg_temp         = 0;      // algorithm temperature (0.0 = deterministic)
     bool    add_gumbel_noise = false;  // Add gumbel noise to the logits if temp > 0.0
+    float   threshold        = 0.95f;  // Confidence threshold for transfer
 
     int32_t max_length = 0;            // Maximum sequence length
+    bool    is_llada2  = false;        // LLaDA2.0 specific processing
 };
 
 struct callback_data {
@@ -232,6 +234,11 @@ static void diffusion_generate(llama_context *          ctx,
     std::vector<int32_t> mask_positions;
     mask_positions.reserve(params.max_length);
 
+    // Get EOS token for early termination
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+    llama_token eos_token_id = llama_vocab_eos(vocab);
+    LOG_INF("DEBUG: EOS token ID = %d\n", eos_token_id);
+    
     // Setup sampler chain
     struct llama_sampler * sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
     if (params.top_k > 0) {
@@ -267,8 +274,15 @@ static void diffusion_generate(llama_context *          ctx,
     if (params.schedule == BLOCK_BASED) {
         GGML_ASSERT(params.max_length % params.block_length == 0);
         num_blocks = params.max_length / params.block_length;
-        GGML_ASSERT(params.steps % num_blocks == 0);
-        steps_per_block = params.steps / num_blocks;
+       
+        if (params.is_llada2) {
+            // LLaDA2.0: steps parameter is steps PER block
+            steps_per_block = params.steps;
+        } else {
+            // Dream/LLaDA1.0: steps parameter is TOTAL steps across all blocks
+            GGML_ASSERT(params.steps % num_blocks == 0);
+            steps_per_block = params.steps / num_blocks;
+        }
     }
 
     std::vector<float> confidence(params.max_length);
@@ -277,35 +291,69 @@ static void diffusion_generate(llama_context *          ctx,
     int64_t total_time          = 0;
     int64_t time_start          = ggml_time_us();
 
-    for (int block_num = 0; block_num < num_blocks; block_num++) {
-        int32_t block_start = (params.schedule == BLOCK_BASED) ? n_input + block_num * params.block_length : 0;
-        int32_t block_end   = (params.schedule == BLOCK_BASED) ?
-                                  std::min(n_input + (block_num + 1) * params.block_length, params.max_length) :
-                                  params.max_length;
+    bool all_tokens_filled = false;
+    for (int block_num = 0; block_num < num_blocks && !all_tokens_filled; block_num++) {
+        int32_t block_start, block_end;
+        
+        if (params.is_llada2) {
+            // LLaDA2.0: blocks start from position 0
+            block_start = (params.schedule == BLOCK_BASED) ? block_num * params.block_length : 0;
+            block_end = (params.schedule == BLOCK_BASED) ?
+                        std::min((block_num + 1) * params.block_length, params.max_length) :
+                        params.max_length;
+            
+            // Skip blocks fully within the prompt (already processed)
+            if (block_end <= n_input) {
+                continue;
+            }
+        } else {
+            // Dream/LLaDA1.0: blocks start after input prompt
+            block_start = (params.schedule == BLOCK_BASED) ? n_input + block_num * params.block_length : 0;
+            block_end = (params.schedule == BLOCK_BASED) ?
+                        std::min(n_input + (block_num + 1) * params.block_length, params.max_length) :
+                        params.max_length;
+        }
 
         // Count masked tokens in current block for block-based processing
         if (params.schedule == BLOCK_BASED) {
-            int32_t block_mask_count = 0;
-            for (int i = block_start; i < block_end; i++) {
-                if (output_tokens[i] == params.mask_token_id) {
-                    block_mask_count++;
+            if (params.is_llada2) {
+                // LLaDA2.0: use block_length for scheduling (Python reference behavior)
+                num_transfer_tokens = get_num_transfer_tokens(params.block_length, steps_per_block);
+            } else {
+                // Dream/LLaDA1.0: count actual masked tokens in current block
+                int32_t block_mask_count = 0;
+                for (int i = block_start; i < block_end; i++) {
+                    if (output_tokens[i] == params.mask_token_id) {
+                        block_mask_count++;
+                    }
                 }
+                num_transfer_tokens = get_num_transfer_tokens(block_mask_count, steps_per_block);
             }
-            num_transfer_tokens = get_num_transfer_tokens(block_mask_count, steps_per_block);
         }
 
         for (int32_t step = 0; step < steps_per_block; step++) {
             int32_t global_step = block_num * steps_per_block + step;
-
+            int32_t total_steps = (params.schedule == BLOCK_BASED) ? (num_blocks * steps_per_block) : params.steps;
+            
             if (params.step_callback) {
                 if (!params.step_callback(
-                        global_step, params.steps, output_tokens, params.max_length, params.step_callback_user_data)) {
+                        global_step, total_steps, output_tokens, params.max_length, params.step_callback_user_data)) {
                     break;
                 }
             }
 
             // Setup batch
-            for (int32_t i = 0; i < params.max_length; i++) {
+            int32_t batch_size;
+            if (params.is_llada2) {
+                // LLaDA2.0: truncate to block_end to avoid attending to future masks
+                batch_size = block_end;
+            } else {
+                // Dream/LLaDA1.0: process full sequence
+                batch_size = params.max_length;
+            }
+            
+            batch.n_tokens = batch_size;
+            for (int32_t i = 0; i < batch_size; i++) {
                 batch.token[i]     = output_tokens[i];
                 batch.pos[i]       = i;
                 batch.n_seq_id[i]  = 1;
@@ -446,9 +494,13 @@ static void diffusion_generate(llama_context *          ctx,
                     step, steps_per_block, mask_positions.size(), params.schedule, params.eps, num_transfer_tokens);
 
                 if (transfer_count > 0) {
-                    if (params.alg_temp == 0.0f) {
+                    int32_t actual_transfer_count;
+                    
+                    if (params.is_llada2) {
+                        // LLaDA2.0: threshold-based confidence approach
+                        // Sort by confidence (descending)
                         std::partial_sort(confidences.begin(),
-                                          confidences.begin() + std::min(transfer_count, (int32_t) confidences.size()),
+                                          confidences.end(),
                                           confidences.end(),
                                           [](const std::pair<float, int32_t> & a, const std::pair<float, int32_t> & b) {
                                               if (a.first != b.first) {
@@ -457,41 +509,123 @@ static void diffusion_generate(llama_context *          ctx,
                                               return a.second < b.second;
                                           });
 
-                        for (int32_t i = 0; i < std::min(transfer_count, (int32_t) confidences.size()); i++) {
-                            int32_t mask_idx   = confidences[i].second;
-                            int32_t pos        = mask_positions[mask_idx];
-                            output_tokens[pos] = sampled_tokens[mask_idx];
+                        // Count high confidence tokens
+                        int32_t high_conf_count = 0;
+                        float threshold = params.threshold;
+                        for (const auto& item : confidences) {
+                            if (item.first > threshold) {
+                                high_conf_count++;
+                            }
                         }
+
+                        actual_transfer_count = transfer_count;
+                        if (high_conf_count >= transfer_count) {
+                            actual_transfer_count = high_conf_count;
+                        }
+                        actual_transfer_count = std::min(actual_transfer_count, (int32_t)confidences.size());
+                           
                     } else {
-                        conf_candidates.clear();
-                        for (size_t i = 0; i < confidences.size(); i++) {
-                            float conf_logit = confidences[i].first / params.alg_temp;
-                            conf_candidates.emplace_back(llama_token_data{ (int32_t) i, conf_logit, 0.0f });
-                        }
+                        // Dream/LLaDA1.0: alg_temp-based approach (original implementation)
+                        if (params.alg_temp == 0.0f) {
+                            // Deterministic selection: sort and take top transfer_count
+                            std::partial_sort(confidences.begin(),
+                                              confidences.begin() + std::min(transfer_count, (int32_t) confidences.size()),
+                                              confidences.end(),
+                                              [](const std::pair<float, int32_t> & a, const std::pair<float, int32_t> & b) {
+                                                  if (a.first != b.first) {
+                                                      return a.first > b.first;
+                                                  }
+                                                  return a.second < b.second;
+                                              });
+                            actual_transfer_count = std::min(transfer_count, (int32_t) confidences.size());
+                        } else {
+                            // Stochastic selection using alg_temp
+                            conf_candidates.clear();
+                            for (size_t i = 0; i < confidences.size(); i++) {
+                                float conf_logit = confidences[i].first / params.alg_temp;
+                                conf_candidates.emplace_back(llama_token_data{ (int32_t) i, conf_logit, 0.0f });
+                            }
 
-                        llama_token_data_array conf_array = {
-                            conf_candidates.data(),
-                            conf_candidates.size(),
-                            -1,
-                            false,
-                        };
+                            llama_token_data_array conf_array = {
+                                conf_candidates.data(),
+                                conf_candidates.size(),
+                                -1,
+                                false,
+                            };
 
-                        for (int32_t i = 0; i < std::min(transfer_count, (int32_t) confidences.size()); i++) {
-                            llama_sampler_apply(dist_sampler, &conf_array);
-                            int32_t selected_idx = conf_array.selected;
-                            int32_t mask_idx     = selected_idx;
-                            int32_t pos          = mask_positions[mask_idx];
-                            output_tokens[pos]   = sampled_tokens[mask_idx];
+                            // Sample transfer_count positions stochastically
+                            actual_transfer_count = std::min(transfer_count, (int32_t) confidences.size());
+                            for (int32_t i = 0; i < actual_transfer_count; i++) {
+                                llama_sampler_apply(dist_sampler, &conf_array);
+                                int32_t selected_idx = conf_array.selected;
+                                int32_t mask_idx     = selected_idx;
+                                int32_t pos          = mask_positions[mask_idx];
+                                output_tokens[pos]   = sampled_tokens[mask_idx];
 
-                            conf_candidates[selected_idx].p = 0.0f;
-                            conf_array.selected             = -1;
+                                // Mark as used by setting p to 0
+                                conf_candidates[selected_idx].p = 0.0f;
+                                conf_array.selected             = -1;
+                            }
+                            // Skip the common transfer loop below for stochastic case
+                            actual_transfer_count = 0;
                         }
                     }
+
+                    // Transfer tokens (deterministic case for both models)
+                    for (int32_t i = 0; i < actual_transfer_count; i++) {
+                        int32_t mask_idx   = confidences[i].second;
+                        int32_t pos        = mask_positions[mask_idx];
+                        llama_token transferred_token = sampled_tokens[mask_idx];
+                        output_tokens[pos] = transferred_token;
+                       
+                        // EOS early stop (LLaDA2.0 only)
+                        if (params.is_llada2 && transferred_token == eos_token_id) {
+                            // Verify all tokens from n_input to pos are filled
+                            bool all_filled_before_eos = true;
+                            for (int32_t j = n_input; j < pos; j++) {
+                                if (output_tokens[j] == params.mask_token_id) {
+                                    all_filled_before_eos = false;
+                                    break;
+                                }
+                            }
+                            if (all_filled_before_eos) {
+                                LOG_INF("\nEOS detected at position %d, all prior tokens filled. Terminating.\n", pos);
+                                n_generated = pos + 1 - n_input;
+                                all_tokens_filled = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (params.is_llada2 && all_tokens_filled) break; // Exit step loop
+                } else {
+                    LOG_INF("DEBUG: Transfer count is 0!\n");
                 }
             }
 
             int64_t time_end_sampling = ggml_time_us();
             total_sampling_time += time_end_sampling - time_start_sampling;
+        }
+
+        // Check for EOS after block completes (LLaDA2.0 only)
+        if (params.is_llada2) {
+            for (int32_t i = n_input; i < block_end; i++) {
+                if (output_tokens[i] == eos_token_id) {
+                    // Check if all tokens before EOS are filled
+                    bool all_filled = true;
+                    for (int32_t j = n_input; j < i; j++) {
+                        if (output_tokens[j] == params.mask_token_id) {
+                            all_filled = false;
+                            break;
+                        }
+                    }
+                    if (all_filled) {
+                        LOG_INF("\nEOS found at position %d after block %d. Terminating.\n", i, block_num);
+                        n_generated = i + 1 - n_input;
+                        all_tokens_filled = true;
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -567,11 +701,18 @@ int main(int argc, char ** argv) {
         llama_model_free(model);
         return 1;
     }
-
+    
+    // Compute max_length early to ensure n_ubatch is large enough
+    int32_t max_length = params.n_predict > 0 ? params.n_predict : params.n_ctx;
+    
+    LOG_INF("DEBUG: params.n_ctx = %d\n", params.n_ctx);
+    LOG_INF("DEBUG: params.n_predict = %d\n", params.n_predict);
+    LOG_INF("DEBUG: max_length = %d\n", max_length);
+    
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx                = params.n_ctx;
-    ctx_params.n_batch              = params.n_batch;
-    ctx_params.n_ubatch             = params.n_ubatch;
+    ctx_params.n_batch              = std::max(params.n_batch, max_length); // Ensure n_batch >= max_length NOT FINAL ITS JUST FOR TESTING!
+    ctx_params.n_ubatch             = std::max(params.n_ubatch, max_length); // Ensure n_ubatch >= max_length
     ctx_params.flash_attn_type      = params.flash_attn_type;
     ctx_params.no_perf              = params.no_perf;
     ctx_params.type_k               = params.cache_type_k;
@@ -611,15 +752,27 @@ int main(int argc, char ** argv) {
     bool visual_mode = params.diffusion.visual_mode;
 
     int32_t                  n_generated = 0;
-    std::vector<llama_token> output_tokens(params.n_ubatch);
+    std::vector<llama_token> output_tokens(max_length);
 
     struct diffusion_params diff_params;
 
+    // Detect if this is LLaDA2.0 model for conditional behavior
+    bool is_llada2 = false;
+    char model_arch_str[64];
+    if (llama_model_meta_val_str(model, "general.architecture", model_arch_str, sizeof(model_arch_str)) >= 0) {
+        is_llada2 = (strcmp(model_arch_str, "llada2") == 0);
+    }
+    
     char shift_logits_str[8];
     if (llama_model_meta_val_str(model, "diffusion.shift_logits", shift_logits_str, sizeof(shift_logits_str)) >= 0) {
         diff_params.shift_logits = (strcmp(shift_logits_str, "true") == 0);
     } else {
-        diff_params.shift_logits = true;
+        // Model-dependent default
+        if (is_llada2) {
+            diff_params.shift_logits = false;  // LLaDA2.0 default: unshifted logits
+        } else {
+            diff_params.shift_logits = true;   // Dream/LLaDA1.0 default: shifted logits
+        }
     }
 
     //Use either eps or block length, but not both
@@ -638,11 +791,12 @@ int main(int argc, char ** argv) {
     diff_params.temperature      = params.sampling.temp;
     diff_params.steps            = params.diffusion.steps;
     diff_params.algorithm        = static_cast<diffusion_algorithm>(params.diffusion.algorithm);
-    diff_params.max_length       = params.n_ubatch;
+    diff_params.max_length       = max_length;
     diff_params.top_p            = params.sampling.top_p;
     diff_params.top_k            = params.sampling.top_k;
     diff_params.visual_mode      = params.diffusion.visual_mode;
     diff_params.add_gumbel_noise = params.diffusion.add_gumbel_noise;
+    diff_params.is_llada2        = is_llada2;
 
     diff_params.step_callback           = diffusion_step_callback;
     callback_data cb_data               = { &diff_params, vocab, n_input };
