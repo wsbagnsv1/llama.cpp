@@ -52,7 +52,6 @@ struct diffusion_params {
     float   threshold        = -1.0f;  // Confidence threshold for transfer (-1.0 = not set, use alg_temp-based sampling)
 
     int32_t max_length      = 0;     // Maximum sequence length
-    bool    is_llada2       = false; // LLaDA2.0 specific processing
     bool    eos_early_stop  = false; // Enable early EOS termination
     bool    truncate_batch  = false; // Truncate batch to block_end (vs full sequence)
 };
@@ -730,13 +729,6 @@ int main(int argc, char ** argv) {
 
     struct diffusion_params diff_params;
 
-    // Detect if this is LLaDA2.0 model for conditional behavior
-    bool is_llada2 = false;
-    char model_arch_str[64];
-    if (llama_model_meta_val_str(model, "general.architecture", model_arch_str, sizeof(model_arch_str)) >= 0) {
-        is_llada2 = (strcmp(model_arch_str, "llada2") == 0);
-    }
-    
     char shift_logits_str[8];
     if (llama_model_meta_val_str(model, "diffusion.shift_logits", shift_logits_str, sizeof(shift_logits_str)) >= 0) {
         diff_params.shift_logits = (strcmp(shift_logits_str, "true") == 0);
@@ -767,6 +759,7 @@ int main(int argc, char ** argv) {
     } else {
         // Default to false for backward compatibility
         diff_params.truncate_batch = false;
+    }  
         
     //Use either eps or block length, but not both
     GGML_ASSERT((params.diffusion.eps == 0) ^ (params.diffusion.block_length == 0));
@@ -789,7 +782,6 @@ int main(int argc, char ** argv) {
     diff_params.top_k            = params.sampling.top_k;
     diff_params.visual_mode      = params.diffusion.visual_mode;
     diff_params.add_gumbel_noise = params.diffusion.add_gumbel_noise;
-    diff_params.is_llada2        = is_llada2;
 
     diff_params.step_callback           = diffusion_step_callback;
     callback_data cb_data               = { &diff_params, vocab, n_input };
