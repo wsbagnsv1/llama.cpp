@@ -49,10 +49,12 @@ struct diffusion_params {
     int32_t block_length     = 0;      // Block size (for block scheduling)
     float   alg_temp         = 0;      // algorithm temperature (0.0 = deterministic)
     bool    add_gumbel_noise = false;  // Add gumbel noise to the logits if temp > 0.0
-    float   threshold        = 0.95f;  // Confidence threshold for transfer
+    float   threshold        = -1.0f;  // Confidence threshold for transfer (-1.0 = not set, use alg_temp-based sampling)
 
-    int32_t max_length = 0;            // Maximum sequence length
-    bool    is_llada2  = false;        // LLaDA2.0 specific processing
+    int32_t max_length      = 0;     // Maximum sequence length
+    bool    is_llada2       = false; // LLaDA2.0 specific processing
+    bool    eos_early_stop  = false; // Enable early EOS termination
+    bool    truncate_batch  = false; // Truncate batch to block_end (vs full sequence)
 };
 
 struct callback_data {
@@ -316,11 +318,11 @@ static void diffusion_generate(llama_context *          ctx,
 
             // Setup batch
             int32_t batch_size;
-            if (params.is_llada2) {
-                // LLaDA2.0: truncate to block_end to avoid attending to future masks
+            if (params.truncate_batch) {
+                // Truncate to block_end to avoid attending to future blocks
                 batch_size = block_end;
             } else {
-                // Dream/LLaDA1.0: process full sequence
+                // Process full sequence
                 batch_size = params.max_length;
             }
             
@@ -468,8 +470,8 @@ static void diffusion_generate(llama_context *          ctx,
                 if (transfer_count > 0) {
                     int32_t actual_transfer_count;
                     
-                    if (params.is_llada2) {
-                        // LLaDA2.0: threshold-based confidence approach
+                    if (params.threshold > 0.0f) {
+                        // Threshold-based confidence approach
                         // Sort by confidence (descending)
                         std::partial_sort(confidences.begin(),
                                           confidences.end(),
@@ -497,7 +499,7 @@ static void diffusion_generate(llama_context *          ctx,
                         actual_transfer_count = std::min(actual_transfer_count, (int32_t)confidences.size());
                            
                     } else {
-                        // Dream/LLaDA1.0: alg_temp-based approach (original implementation)
+                        // alg_temp-based approach (fallback when threshold not set)
                         if (params.alg_temp == 0.0f) {
                             // Deterministic selection: sort and take top transfer_count
                             std::partial_sort(confidences.begin(),
@@ -550,8 +552,8 @@ static void diffusion_generate(llama_context *          ctx,
                         llama_token transferred_token = sampled_tokens[mask_idx];
                         output_tokens[pos] = transferred_token;
                        
-                        // EOS early stop (LLaDA2.0 only)
-                        if (params.is_llada2 && transferred_token == eos_token_id) {
+                        // EOS early stop
+                        if (params.eos_early_stop && transferred_token == eos_token_id) {
                             // Verify all tokens from n_input to pos are filled
                             bool all_filled_before_eos = true;
                             for (int32_t j = n_input; j < pos; j++) {
@@ -568,7 +570,7 @@ static void diffusion_generate(llama_context *          ctx,
                             }
                         }
                     }
-                    if (params.is_llada2 && all_tokens_filled) break; // Exit step loop
+                    if (params.eos_early_stop && all_tokens_filled) break; // Exit step loop
                 } else {
                     LOG_INF("DEBUG: Transfer count is 0!\n");
                 }
@@ -578,8 +580,8 @@ static void diffusion_generate(llama_context *          ctx,
             total_sampling_time += time_end_sampling - time_start_sampling;
         }
 
-        // Check for EOS after block completes (LLaDA2.0 only)
-        if (params.is_llada2) {
+        // Check for EOS after block completes
+        if (params.eos_early_stop) {
             for (int32_t i = n_input; i < block_end; i++) {
                 if (output_tokens[i] == eos_token_id) {
                     // Check if all tokens before EOS are filled
@@ -739,14 +741,33 @@ int main(int argc, char ** argv) {
     if (llama_model_meta_val_str(model, "diffusion.shift_logits", shift_logits_str, sizeof(shift_logits_str)) >= 0) {
         diff_params.shift_logits = (strcmp(shift_logits_str, "true") == 0);
     } else {
-        // Model-dependent default
-        if (is_llada2) {
-            diff_params.shift_logits = false;  // LLaDA2.0 default: unshifted logits
-        } else {
-            diff_params.shift_logits = true;   // Dream/LLaDA1.0 default: shifted logits
-        }
+        diff_params.shift_logits = true;
     }
 
+    // Read EOS early stop parameter from GGUF metadata
+    char eos_early_stop_str[8];
+    if (llama_model_meta_val_str(model, "diffusion.eos_early_stop", eos_early_stop_str, sizeof(eos_early_stop_str)) >= 0) {
+        diff_params.eos_early_stop = (strcmp(eos_early_stop_str, "true") == 0);
+    } else {
+        // Default to false for backward compatibility
+        diff_params.eos_early_stop = false;
+    }
+
+    // Read threshold parameter from GGUF metadata
+    char threshold_str[32];
+    if (llama_model_meta_val_str(model, "diffusion.threshold", threshold_str, sizeof(threshold_str)) >= 0) {
+        diff_params.threshold = std::stof(threshold_str);
+    }
+    // If not present, threshold remains at -1.0f (use alg_temp-based sampling)
+
+    // Read batch strategy parameter from GGUF metadata
+    char batch_strategy_str[32];
+    if (llama_model_meta_val_str(model, "diffusion.batch_strategy", batch_strategy_str, sizeof(batch_strategy_str)) >= 0) {
+        diff_params.truncate_batch = (strcmp(batch_strategy_str, "truncate") == 0);
+    } else {
+        // Default to false for backward compatibility
+        diff_params.truncate_batch = false;
+        
     //Use either eps or block length, but not both
     GGML_ASSERT((params.diffusion.eps == 0) ^ (params.diffusion.block_length == 0));
 
