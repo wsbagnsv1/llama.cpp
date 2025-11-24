@@ -287,26 +287,10 @@ static void diffusion_generate(llama_context *          ctx,
 
     bool all_tokens_filled = false;
     for (int block_num = 0; block_num < num_blocks && !all_tokens_filled; block_num++) {
-        int32_t block_start, block_end;
-        
-        if (params.is_llada2) {
-            // LLaDA2.0: blocks start from position 0
-            block_start = (params.schedule == BLOCK_BASED) ? block_num * params.block_length : 0;
-            block_end = (params.schedule == BLOCK_BASED) ?
-                        std::min((block_num + 1) * params.block_length, params.max_length) :
-                        params.max_length;
-            
-            // Skip blocks fully within the prompt (already processed)
-            if (block_end <= n_input) {
-                continue;
-            }
-        } else {
-            // Dream/LLaDA1.0: blocks start after input prompt
-            block_start = (params.schedule == BLOCK_BASED) ? n_input + block_num * params.block_length : 0;
-            block_end = (params.schedule == BLOCK_BASED) ?
-                        std::min(n_input + (block_num + 1) * params.block_length, params.max_length) :
-                        params.max_length;
-        }
+        int32_t block_start = (params.schedule == BLOCK_BASED) ? n_input + block_num * params.block_length : 0;
+        int32_t block_end   = (params.schedule == BLOCK_BASED) ?
+                                  std::min(n_input + (block_num + 1) * params.block_length, params.max_length) :
+                                  params.max_length;
 
         // Count masked tokens in current block for block-based processing
         if (params.schedule == BLOCK_BASED) {
