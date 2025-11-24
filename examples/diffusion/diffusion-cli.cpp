@@ -306,7 +306,7 @@ static void diffusion_generate(llama_context *          ctx,
 
         for (int32_t step = 0; step < steps_per_block; step++) {
             int32_t global_step = block_num * steps_per_block + step;
-            
+
             if (params.step_callback) {
                 if (!params.step_callback(
                         global_step, params.steps, output_tokens, params.max_length, params.step_callback_user_data)) {
