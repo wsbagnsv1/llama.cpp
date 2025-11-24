@@ -8730,7 +8730,6 @@ class LLaDA2MoeModel(BailingMoeV2Model):
         hparams = self.hparams
 
         # Override specific parameters for LLaDA2.0
-        # Add LLaDA2.0 specific parameters using generic add_key_value method
         if "max_window_layers" in hparams:
             self.gguf_writer.add_key_value("llada.max_window_layers", hparams["max_window_layers"], gguf.GGUFValueType.UINT32)
 
@@ -8745,6 +8744,12 @@ class LLaDA2MoeModel(BailingMoeV2Model):
         if "pad_token_id" in hparams:
             self.gguf_writer.add_pad_token_id(hparams["pad_token_id"])
 
+        # Diffusion parameters
+        self.gguf_writer.add_string(gguf.Keys.Diffusion.BATCH_STRATEGY, "truncate")
+        self.gguf_writer.add_bool(gguf.Keys.Diffusion.EOS_EARLY_STOP, True)
+        self.gguf_writer.add_float32(gguf.Keys.Diffusion.THRESHOLD, 0.95)
+        self.gguf_writer.add_diffusion_shift_logits(False)
+        
     def set_vocab(self):
         # Use the same vocab as BailingMoeV2Model
         self._set_vocab_gpt2()
