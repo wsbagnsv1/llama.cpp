@@ -275,14 +275,8 @@ static void diffusion_generate(llama_context *          ctx,
         GGML_ASSERT(params.max_length % params.block_length == 0);
         num_blocks = params.max_length / params.block_length;
        
-        if (params.is_llada2) {
-            // LLaDA2.0: steps parameter is steps PER block
-            steps_per_block = params.steps;
-        } else {
-            // Dream/LLaDA1.0: steps parameter is TOTAL steps across all blocks
-            GGML_ASSERT(params.steps % num_blocks == 0);
-            steps_per_block = params.steps / num_blocks;
-        }
+        GGML_ASSERT(params.steps % num_blocks == 0);
+        steps_per_block = params.steps / num_blocks;
     }
 
     std::vector<float> confidence(params.max_length);
@@ -316,19 +310,13 @@ static void diffusion_generate(llama_context *          ctx,
 
         // Count masked tokens in current block for block-based processing
         if (params.schedule == BLOCK_BASED) {
-            if (params.is_llada2) {
-                // LLaDA2.0: use block_length for scheduling (Python reference behavior)
-                num_transfer_tokens = get_num_transfer_tokens(params.block_length, steps_per_block);
-            } else {
-                // Dream/LLaDA1.0: count actual masked tokens in current block
-                int32_t block_mask_count = 0;
-                for (int i = block_start; i < block_end; i++) {
-                    if (output_tokens[i] == params.mask_token_id) {
-                        block_mask_count++;
-                    }
+            int32_t block_mask_count = 0;
+            for (int i = block_start; i < block_end; i++) {
+                if (output_tokens[i] == params.mask_token_id) {
+                    block_mask_count++;
                 }
-                num_transfer_tokens = get_num_transfer_tokens(block_mask_count, steps_per_block);
             }
+            num_transfer_tokens = get_num_transfer_tokens(block_mask_count, steps_per_block);
         }
 
         for (int32_t step = 0; step < steps_per_block; step++) {
