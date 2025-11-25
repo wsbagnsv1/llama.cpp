@@ -304,7 +304,7 @@ class Keys:
     class Diffusion:
         SHIFT_LOGITS        = "diffusion.shift_logits"
         BATCH_STRATEGY      = "diffusion.batch_strategy"
-        CHECK_EOS           = "diffusion.eos_early_stop"
+        EOS_EARLY_STOP      = "diffusion.eos_early_stop"
         THRESHOLD           = "diffusion.threshold"
 
     class xIELU:
