@@ -59,7 +59,7 @@ llm_build_llada2::llm_build_llada2(const llama_model & model, const llm_graph_pa
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
         }
 
-        if (il == n_transformer_layers - 1 && inp_out_ids) {
+        if (il == n_layer - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
             inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
         }
