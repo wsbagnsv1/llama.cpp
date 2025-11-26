@@ -317,10 +317,6 @@ class Keys:
 
     class Diffusion:
         SHIFT_LOGITS        = "diffusion.shift_logits"
-        BATCH_STRATEGY      = "diffusion.batch_strategy"
-        EOS_EARLY_STOP      = "diffusion.eos_early_stop"
-        THRESHOLD           = "diffusion.threshold"
-        HYBRID_DIFFUSION    = "diffusion.hybrid_diffusion"
 
     class xIELU:
         ALPHA_P             = "xielu.alpha_p"
@@ -2979,12 +2975,6 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_GATE_SHEXP,
         MODEL_TENSOR.FFN_DOWN_SHEXP,
         MODEL_TENSOR.FFN_UP_SHEXP,
-        MODEL_TENSOR.NEXTN_EH_PROJ,
-        MODEL_TENSOR.NEXTN_EMBED_TOKENS,
-        MODEL_TENSOR.NEXTN_ENORM,
-        MODEL_TENSOR.NEXTN_HNORM,
-        MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD,
-        MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM,
         MODEL_TENSOR.LAYER_OUT_NORM,
     ],
     MODEL_ARCH.GROVEMOE: [

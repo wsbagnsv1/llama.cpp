@@ -8733,42 +8733,9 @@ class BailingMoeV2Model(TextModel):
 class LLaDA2MoeModel(BailingMoeV2Model):
     model_arch = gguf.MODEL_ARCH.LLADA2
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Set block_count directly from num_hidden_layers
-        self.block_count = self.hparams["num_hidden_layers"]
-        # Use the same tensor mapping as BailingMoeV2Model since they have identical tensor structure
-        self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
-
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
-        hparams = self.hparams
-
-        # Override specific parameters for LLaDA2.0
-        if "max_window_layers" in hparams:
-            self.gguf_writer.add_key_value("llada.max_window_layers", hparams["max_window_layers"], gguf.GGUFValueType.UINT32)
-
-        if "output_router_logits" in hparams:
-            self.gguf_writer.add_key_value("llada.output_router_logits", hparams["output_router_logits"], gguf.GGUFValueType.BOOL)
-
-        # Handle sliding window configuration
-        if "use_sliding_window" in hparams:
-            self.gguf_writer.add_key_value("llada.use_sliding_window", hparams["use_sliding_window"], gguf.GGUFValueType.BOOL)
-
-        # Set the correct pad token ID for LLaDA2.0
-        if "pad_token_id" in hparams:
-            self.gguf_writer.add_pad_token_id(hparams["pad_token_id"])
-
-        # Diffusion parameters
-        self.gguf_writer.add_string(gguf.Keys.Diffusion.BATCH_STRATEGY, "truncate")
-        self.gguf_writer.add_bool(gguf.Keys.Diffusion.EOS_EARLY_STOP, True)
-        self.gguf_writer.add_float32(gguf.Keys.Diffusion.THRESHOLD, 0.95)
-        self.gguf_writer.add_bool(gguf.Keys.Diffusion.HYBRID_DIFFUSION, True)
         self.gguf_writer.add_diffusion_shift_logits(False)
-        
-    def set_vocab(self):
-        # Use the same vocab as BailingMoeV2Model
-        self._set_vocab_gpt2()
 
 @ModelBase.register("GroveMoeForCausalLM", "modeling_grove_moe.GroveMoeForCausalLM")
 class GroveMoeModel(TextModel):

@@ -53,7 +53,6 @@ struct diffusion_params {
 
     int32_t max_length        = 0;     // Maximum sequence length
     bool    eos_early_stop    = false; // Enable early EOS termination
-    bool    truncate_batch    = false; // Truncate batch to block_end (vs full sequence)
     bool    hybrid_diffusion  = false; // Enable hybrid diffusion optimization with KV cache
 };
 
@@ -239,7 +238,12 @@ static void diffusion_generate(llama_context *          ctx,
     // Get EOS token for early termination
     const llama_vocab * vocab = llama_model_get_vocab(model);
     llama_token eos_token_id = llama_vocab_eos(vocab);
-    LOG_INF("DEBUG: EOS token ID = %d\n", eos_token_id);
+    
+    if (params.eos_early_stop) {
+        GGML_ASSERT(eos_token_id != LLAMA_TOKEN_NULL);
+    }
+    
+    LOG_DBG("DEBUG: EOS token ID = %d\n", eos_token_id);
     
     // Setup sampler chain
     struct llama_sampler * sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
@@ -276,7 +280,6 @@ static void diffusion_generate(llama_context *          ctx,
     if (params.schedule == BLOCK_BASED) {
         GGML_ASSERT(params.max_length % params.block_length == 0);
         num_blocks = params.max_length / params.block_length;
-       
         GGML_ASSERT(params.steps % num_blocks == 0);
         steps_per_block = params.steps / num_blocks;
     }
@@ -364,14 +367,10 @@ static void diffusion_generate(llama_context *          ctx,
                 }
             }
 
-            if (params.hybrid_diffusion && params.truncate_batch) {
+            if (params.hybrid_diffusion) {
                 // Hybrid Diffusion: Truncate to active block only
                 batch_start_pos = block_start;
                 batch_size      = block_end - block_start;
-            } else if (params.truncate_batch) {
-                // Legacy: Truncate to block_end
-                batch_start_pos = 0;
-                batch_size      = block_end;
             } else {
                 // Process full sequence
                 batch_start_pos = 0;
@@ -634,7 +633,7 @@ static void diffusion_generate(llama_context *          ctx,
                                 }
                             }
                             if (all_filled_before_eos) {
-                                LOG_INF("\nEOS detected at position %d, all prior tokens filled. Terminating.\n", pos);
+                                LOG_DBG("\nEOS detected at position %d, all prior tokens filled. Terminating.\n", pos);
                                 n_generated = pos + 1 - n_input;
                                 all_tokens_filled = true;
                                 break;
@@ -643,7 +642,7 @@ static void diffusion_generate(llama_context *          ctx,
                     }
                     if (params.eos_early_stop && all_tokens_filled) break; // Exit step loop
                 } else {
-                    LOG_INF("DEBUG: Transfer count is 0!\n");
+                    LOG_DBG("DEBUG: Transfer count is 0!\n");
                 }
             }
 
@@ -664,7 +663,7 @@ static void diffusion_generate(llama_context *          ctx,
                         }
                     }
                     if (all_filled) {
-                        LOG_INF("\nEOS found at position %d after block %d. Terminating.\n", i, block_num);
+                        LOG_DBG("\nEOS found at position %d after block %d. Terminating.\n", i, block_num);
                         n_generated = i + 1 - n_input;
                         all_tokens_filled = true;
                         break;
@@ -750,14 +749,14 @@ int main(int argc, char ** argv) {
     // Compute max_length early to ensure n_ubatch is large enough
     int32_t max_length = params.n_predict > 0 ? params.n_predict : params.n_ctx;
     
-    LOG_INF("DEBUG: params.n_ctx = %d\n", params.n_ctx);
-    LOG_INF("DEBUG: params.n_predict = %d\n", params.n_predict);
-    LOG_INF("DEBUG: max_length = %d\n", max_length);
+    LOG_DBG("DEBUG: params.n_ctx = %d\n", params.n_ctx);
+    LOG_DBG("DEBUG: params.n_predict = %d\n", params.n_predict);
+    LOG_DBG("DEBUG: max_length = %d\n", max_length);
     
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx                = params.n_ctx;
-    ctx_params.n_batch              = std::max(params.n_batch, max_length); // Ensure n_batch >= max_length NOT FINAL ITS JUST FOR TESTING!
-    ctx_params.n_ubatch             = std::max(params.n_ubatch, max_length); // Ensure n_ubatch >= max_length
+    ctx_params.n_batch              = params.n_batch;
+    ctx_params.n_ubatch             = params.n_ubatch;
     ctx_params.flash_attn_type      = params.flash_attn_type;
     ctx_params.no_perf              = params.no_perf;
     ctx_params.type_k               = params.cache_type_k;
@@ -808,40 +807,14 @@ int main(int argc, char ** argv) {
         diff_params.shift_logits = true;
     }
 
-    // Read EOS early stop parameter from GGUF metadata
-    char eos_early_stop_str[8];
-    if (llama_model_meta_val_str(model, "diffusion.eos_early_stop", eos_early_stop_str, sizeof(eos_early_stop_str)) >= 0) {
-        diff_params.eos_early_stop = (strcmp(eos_early_stop_str, "true") == 0);
-    } else {
-        // Default to false for backward compatibility
-        diff_params.eos_early_stop = false;
-    }
+    // EOS early stop parameter from CLI
+    diff_params.eos_early_stop = params.diffusion.eos_early_stop;
 
-    // Read threshold parameter from GGUF metadata
-    char threshold_str[32];
-    if (llama_model_meta_val_str(model, "diffusion.threshold", threshold_str, sizeof(threshold_str)) >= 0) {
-        diff_params.threshold = std::stof(threshold_str);
-    }
-    // If not present, threshold remains at -1.0f (use alg_temp-based sampling)
+    // Threshold parameter from CLI
+    diff_params.threshold = params.diffusion.threshold;
 
-    // Read batch strategy parameter from GGUF metadata
-    char batch_strategy_str[32];
-    if (llama_model_meta_val_str(model, "diffusion.batch_strategy", batch_strategy_str, sizeof(batch_strategy_str)) >= 0) {
-        diff_params.truncate_batch = (strcmp(batch_strategy_str, "truncate") == 0);
-    } else {
-        // Default to false for backward compatibility
-        diff_params.truncate_batch = false;
-    }
-    
-    // Read hybrid_diffusion parameter from GGUF metadata
-    char hybrid_diffusion_str[8];
-    if (llama_model_meta_val_str(model, "diffusion.hybrid_diffusion", hybrid_diffusion_str, sizeof(hybrid_diffusion_str)) >= 0) {
-        diff_params.hybrid_diffusion = (strcmp(hybrid_diffusion_str, "true") == 0);
-        LOG_INF("Hybrid Diffusion: %s\n", diff_params.hybrid_diffusion ? "ENABLED" : "DISABLED");
-    } else {
-        // Default to false for backward compatibility
-        diff_params.hybrid_diffusion = false;
-    }
+    // Hybrid diffusion parameter from CLI
+    diff_params.hybrid_diffusion = params.diffusion.hybrid_diffusion;
         
     //Use either eps or block length, but not both
     GGML_ASSERT((params.diffusion.eps == 0) ^ (params.diffusion.block_length == 0));
@@ -859,7 +832,7 @@ int main(int argc, char ** argv) {
     diff_params.temperature      = params.sampling.temp;
     diff_params.steps            = params.diffusion.steps;
     diff_params.algorithm        = static_cast<diffusion_algorithm>(params.diffusion.algorithm);
-    diff_params.max_length       = max_length;
+    diff_params.max_length       = params.n_ubatch;
     diff_params.top_p            = params.sampling.top_p;
     diff_params.top_k            = params.sampling.top_k;
     diff_params.visual_mode      = params.diffusion.visual_mode;
