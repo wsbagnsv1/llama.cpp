@@ -239,6 +239,11 @@ static void diffusion_generate(llama_context *          ctx,
     // Get EOS token for early termination
     const llama_vocab * vocab = llama_model_get_vocab(model);
     llama_token eos_token_id = llama_vocab_eos(vocab);
+    
+    if (params.eos_early_stop) {
+        GGML_ASSERT(eos_token_id != LLAMA_TOKEN_NULL);
+    }
+    
     LOG_DBG("DEBUG: EOS token ID = %d\n", eos_token_id);
     
     // Setup sampler chain
