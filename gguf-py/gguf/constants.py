@@ -320,6 +320,7 @@ class Keys:
         BATCH_STRATEGY      = "diffusion.batch_strategy"
         EOS_EARLY_STOP      = "diffusion.eos_early_stop"
         THRESHOLD           = "diffusion.threshold"
+        HYBRID_DIFFUSION    = "diffusion.hybrid_diffusion"
 
     class xIELU:
         ALPHA_P             = "xielu.alpha_p"
