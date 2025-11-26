@@ -812,21 +812,11 @@ int main(int argc, char ** argv) {
         diff_params.shift_logits = true;
     }
 
-    // Read EOS early stop parameter from GGUF metadata
-    char eos_early_stop_str[8];
-    if (llama_model_meta_val_str(model, "diffusion.eos_early_stop", eos_early_stop_str, sizeof(eos_early_stop_str)) >= 0) {
-        diff_params.eos_early_stop = (strcmp(eos_early_stop_str, "true") == 0);
-    } else {
-        // Default to false for backward compatibility
-        diff_params.eos_early_stop = false;
-    }
+    // EOS early stop parameter from CLI
+    diff_params.eos_early_stop = params.diffusion.eos_early_stop;
 
-    // Read threshold parameter from GGUF metadata
-    char threshold_str[32];
-    if (llama_model_meta_val_str(model, "diffusion.threshold", threshold_str, sizeof(threshold_str)) >= 0) {
-        diff_params.threshold = std::stof(threshold_str);
-    }
-    // If not present, threshold remains at -1.0f (use alg_temp-based sampling)
+    // Threshold parameter from CLI
+    diff_params.threshold = params.diffusion.threshold;
 
     // Read batch strategy parameter from GGUF metadata
     char batch_strategy_str[32];
