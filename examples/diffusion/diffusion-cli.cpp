@@ -504,6 +504,10 @@ static void diffusion_generate(llama_context *          ctx,
                 std::vector<std::pair<float, int32_t>> confidences;
                 std::vector<llama_token>               sampled_tokens(mask_positions.size());
 
+                int32_t transfer_count = calculate_transfer_count(
+                    step, steps_per_block, mask_positions.size(), params.schedule, params.eps, num_transfer_tokens);
+                int32_t high_conf_count = 0;
+                
                 for (size_t i = 0; i < mask_positions.size(); i++) {
                     int32_t       pos        = mask_positions[i];
                     const float * pos_logits = get_logits_for_pos(pos);
@@ -526,41 +530,42 @@ static void diffusion_generate(llama_context *          ctx,
 
                     float conf = calculate_confidence(cur_p, params.algorithm, rng);
 
+                    if (params.threshold > 0.0f && conf > params.threshold) {
+                        high_conf_count++;
+                    }
+    
                     sampled_tokens[i] = sampled_token;
                     confidences.emplace_back(conf, i);
                 }
-
-                int32_t transfer_count = calculate_transfer_count(
-                    step, steps_per_block, mask_positions.size(), params.schedule, params.eps, num_transfer_tokens);
 
                 if (transfer_count > 0) {
                     int32_t actual_transfer_count;
                     
                     if (params.threshold > 0.0f) {
                         // Threshold-based confidence approach
-                        // Sort by confidence (descending)
-                        std::partial_sort(confidences.begin(),
-                                          confidences.end(),
-                                          confidences.end(),
-                                          [](const std::pair<float, int32_t> & a, const std::pair<float, int32_t> & b) {
-                                              if (a.first != b.first) {
-                                                  return a.first > b.first;
-                                              }
-                                              return a.second < b.second;
-                                          });
-
-                        // Count high confidence tokens
-                        int32_t high_conf_count = 0;
-                        float threshold = params.threshold;
-                        for (const auto& item : confidences) {
-                            if (item.first > threshold) {
-                                high_conf_count++;
-                            }
-                        }
-
-                        actual_transfer_count = transfer_count;
                         if (high_conf_count >= transfer_count) {
+                            // If we have enough high-confidence tokens,
+                            // use stable_partition to move them to the front, preserving relative order (by position).
+                            // This avoids a full sort.
+                            std::stable_partition(confidences.begin(),
+                                                  confidences.end(),
+                                                  [threshold = params.threshold](const std::pair<float, int32_t>& item) {
+                                                      return item.first > threshold;
+                                                  });
                             actual_transfer_count = high_conf_count;
+                        } else {
+                            // Fallback: Not enough high-confidence tokens to meet the schedule.
+                            // Sort to find the top 'transfer_count' tokens.
+                            std::partial_sort(confidences.begin(),
+                                              confidences.begin() + std::min(transfer_count, (int32_t) confidences.size()),
+                                              confidences.end(),
+                                              [](const std::pair<float, int32_t> & a, const std::pair<float, int32_t> & b) {
+                                                  if (a.first != b.first) {
+                                                      return a.first > b.first;
+                                                  }
+                                                  return a.second < b.second;
+                                              });
+                            actual_transfer_count = transfer_count;
                         }
                         actual_transfer_count = std::min(actual_transfer_count, (int32_t)confidences.size());
                            
