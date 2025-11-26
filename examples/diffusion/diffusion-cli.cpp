@@ -53,7 +53,6 @@ struct diffusion_params {
 
     int32_t max_length        = 0;     // Maximum sequence length
     bool    eos_early_stop    = false; // Enable early EOS termination
-    bool    truncate_batch    = false; // Truncate batch to block_end (vs full sequence)
     bool    hybrid_diffusion  = false; // Enable hybrid diffusion optimization with KV cache
 };
 
@@ -368,14 +367,10 @@ static void diffusion_generate(llama_context *          ctx,
                 }
             }
 
-            if (params.hybrid_diffusion && params.truncate_batch) {
+            if (params.hybrid_diffusion) {
                 // Hybrid Diffusion: Truncate to active block only
                 batch_start_pos = block_start;
                 batch_size      = block_end - block_start;
-            } else if (params.truncate_batch) {
-                // Legacy: Truncate to block_end
-                batch_start_pos = 0;
-                batch_size      = block_end;
             } else {
                 // Process full sequence
                 batch_start_pos = 0;
@@ -818,24 +813,8 @@ int main(int argc, char ** argv) {
     // Threshold parameter from CLI
     diff_params.threshold = params.diffusion.threshold;
 
-    // Read batch strategy parameter from GGUF metadata
-    char batch_strategy_str[32];
-    if (llama_model_meta_val_str(model, "diffusion.batch_strategy", batch_strategy_str, sizeof(batch_strategy_str)) >= 0) {
-        diff_params.truncate_batch = (strcmp(batch_strategy_str, "truncate") == 0);
-    } else {
-        // Default to false for backward compatibility
-        diff_params.truncate_batch = false;
-    }
-    
-    // Read hybrid_diffusion parameter from GGUF metadata
-    char hybrid_diffusion_str[8];
-    if (llama_model_meta_val_str(model, "diffusion.hybrid_diffusion", hybrid_diffusion_str, sizeof(hybrid_diffusion_str)) >= 0) {
-        diff_params.hybrid_diffusion = (strcmp(hybrid_diffusion_str, "true") == 0);
-        LOG_DBG("Hybrid Diffusion: %s\n", diff_params.hybrid_diffusion ? "ENABLED" : "DISABLED");
-    } else {
-        // Default to false for backward compatibility
-        diff_params.hybrid_diffusion = false;
-    }
+    // Hybrid diffusion parameter from CLI
+    diff_params.hybrid_diffusion = params.diffusion.hybrid_diffusion;
         
     //Use either eps or block length, but not both
     GGML_ASSERT((params.diffusion.eps == 0) ^ (params.diffusion.block_length == 0));
