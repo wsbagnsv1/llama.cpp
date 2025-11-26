@@ -269,6 +269,8 @@ struct common_params_diffusion {
 
     float   threshold        = -1.0f; // confidence threshold for transfer
     bool    eos_early_stop   = false; // enable early EOS termination
+    bool    hybrid_diffusion = false; // enable hybrid diffusion optimization
+
 };
 
 // reasoning API response format (not to be confused as chat template's reasoning format)
