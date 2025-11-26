@@ -8733,13 +8733,6 @@ class BailingMoeV2Model(TextModel):
 class LLaDA2MoeModel(BailingMoeV2Model):
     model_arch = gguf.MODEL_ARCH.LLADA2
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Set block_count directly from num_hidden_layers
-        self.block_count = self.hparams["num_hidden_layers"]
-        # Use the same tensor mapping as BailingMoeV2Model since they have identical tensor structure
-        self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
-
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
         hparams = self.hparams
