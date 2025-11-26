@@ -8758,10 +8758,6 @@ class LLaDA2MoeModel(BailingMoeV2Model):
         self.gguf_writer.add_float32(gguf.Keys.Diffusion.THRESHOLD, 0.95)
         self.gguf_writer.add_bool(gguf.Keys.Diffusion.HYBRID_DIFFUSION, True)
         self.gguf_writer.add_diffusion_shift_logits(False)
-        
-    def set_vocab(self):
-        # Use the same vocab as BailingMoeV2Model
-        self._set_vocab_gpt2()
 
 @ModelBase.register("GroveMoeForCausalLM", "modeling_grove_moe.GroveMoeForCausalLM")
 class GroveMoeModel(TextModel):
