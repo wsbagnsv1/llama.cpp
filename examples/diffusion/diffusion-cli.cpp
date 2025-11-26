@@ -276,7 +276,6 @@ static void diffusion_generate(llama_context *          ctx,
     if (params.schedule == BLOCK_BASED) {
         GGML_ASSERT(params.max_length % params.block_length == 0);
         num_blocks = params.max_length / params.block_length;
-       
         GGML_ASSERT(params.steps % num_blocks == 0);
         steps_per_block = params.steps / num_blocks;
     }
