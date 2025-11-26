@@ -239,7 +239,7 @@ static void diffusion_generate(llama_context *          ctx,
     // Get EOS token for early termination
     const llama_vocab * vocab = llama_model_get_vocab(model);
     llama_token eos_token_id = llama_vocab_eos(vocab);
-    LOG_INF("DEBUG: EOS token ID = %d\n", eos_token_id);
+    LOG_DBG("DEBUG: EOS token ID = %d\n", eos_token_id);
     
     // Setup sampler chain
     struct llama_sampler * sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
@@ -628,7 +628,7 @@ static void diffusion_generate(llama_context *          ctx,
                                 }
                             }
                             if (all_filled_before_eos) {
-                                LOG_INF("\nEOS detected at position %d, all prior tokens filled. Terminating.\n", pos);
+                                LOG_DBG("\nEOS detected at position %d, all prior tokens filled. Terminating.\n", pos);
                                 n_generated = pos + 1 - n_input;
                                 all_tokens_filled = true;
                                 break;
@@ -637,7 +637,7 @@ static void diffusion_generate(llama_context *          ctx,
                     }
                     if (params.eos_early_stop && all_tokens_filled) break; // Exit step loop
                 } else {
-                    LOG_INF("DEBUG: Transfer count is 0!\n");
+                    LOG_DBG("DEBUG: Transfer count is 0!\n");
                 }
             }
 
@@ -658,7 +658,7 @@ static void diffusion_generate(llama_context *          ctx,
                         }
                     }
                     if (all_filled) {
-                        LOG_INF("\nEOS found at position %d after block %d. Terminating.\n", i, block_num);
+                        LOG_DBG("\nEOS found at position %d after block %d. Terminating.\n", i, block_num);
                         n_generated = i + 1 - n_input;
                         all_tokens_filled = true;
                         break;
@@ -744,9 +744,9 @@ int main(int argc, char ** argv) {
     // Compute max_length early to ensure n_ubatch is large enough
     int32_t max_length = params.n_predict > 0 ? params.n_predict : params.n_ctx;
     
-    LOG_INF("DEBUG: params.n_ctx = %d\n", params.n_ctx);
-    LOG_INF("DEBUG: params.n_predict = %d\n", params.n_predict);
-    LOG_INF("DEBUG: max_length = %d\n", max_length);
+    LOG_DBG("DEBUG: params.n_ctx = %d\n", params.n_ctx);
+    LOG_DBG("DEBUG: params.n_predict = %d\n", params.n_predict);
+    LOG_DBG("DEBUG: max_length = %d\n", max_length);
     
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx                = params.n_ctx;
@@ -831,7 +831,7 @@ int main(int argc, char ** argv) {
     char hybrid_diffusion_str[8];
     if (llama_model_meta_val_str(model, "diffusion.hybrid_diffusion", hybrid_diffusion_str, sizeof(hybrid_diffusion_str)) >= 0) {
         diff_params.hybrid_diffusion = (strcmp(hybrid_diffusion_str, "true") == 0);
-        LOG_INF("Hybrid Diffusion: %s\n", diff_params.hybrid_diffusion ? "ENABLED" : "DISABLED");
+        LOG_DBG("Hybrid Diffusion: %s\n", diff_params.hybrid_diffusion ? "ENABLED" : "DISABLED");
     } else {
         // Default to false for backward compatibility
         diff_params.hybrid_diffusion = false;
