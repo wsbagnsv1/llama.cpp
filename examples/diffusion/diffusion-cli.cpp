@@ -750,8 +750,8 @@ int main(int argc, char ** argv) {
     
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx                = params.n_ctx;
-    ctx_params.n_batch              = std::max(params.n_batch, max_length); // Ensure n_batch >= max_length NOT FINAL ITS JUST FOR TESTING!
-    ctx_params.n_ubatch             = std::max(params.n_ubatch, max_length); // Ensure n_ubatch >= max_length
+    ctx_params.n_batch              = params.n_batch;
+    ctx_params.n_ubatch             = params.n_ubatch;
     ctx_params.flash_attn_type      = params.flash_attn_type;
     ctx_params.no_perf              = params.no_perf;
     ctx_params.type_k               = params.cache_type_k;
@@ -853,7 +853,7 @@ int main(int argc, char ** argv) {
     diff_params.temperature      = params.sampling.temp;
     diff_params.steps            = params.diffusion.steps;
     diff_params.algorithm        = static_cast<diffusion_algorithm>(params.diffusion.algorithm);
-    diff_params.max_length       = max_length;
+    diff_params.max_length       = params.n_ubatch;
     diff_params.top_p            = params.sampling.top_p;
     diff_params.top_k            = params.sampling.top_k;
     diff_params.visual_mode      = params.diffusion.visual_mode;
