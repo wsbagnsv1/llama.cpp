@@ -8763,6 +8763,7 @@ class LLaDA2MoeModel(BailingMoeV2Model):
         self.gguf_writer.add_string(gguf.Keys.Diffusion.BATCH_STRATEGY, "truncate")
         self.gguf_writer.add_bool(gguf.Keys.Diffusion.EOS_EARLY_STOP, True)
         self.gguf_writer.add_float32(gguf.Keys.Diffusion.THRESHOLD, 0.95)
+        self.gguf_writer.add_bool(gguf.Keys.Diffusion.HYBRID_DIFFUSION, True)
         self.gguf_writer.add_diffusion_shift_logits(False)
         
     def set_vocab(self):

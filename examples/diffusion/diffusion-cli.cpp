@@ -51,9 +51,10 @@ struct diffusion_params {
     bool    add_gumbel_noise = false;  // Add gumbel noise to the logits if temp > 0.0
     float   threshold        = -1.0f;  // Confidence threshold for transfer (-1.0 = not set, use alg_temp-based sampling)
 
-    int32_t max_length      = 0;     // Maximum sequence length
-    bool    eos_early_stop  = false; // Enable early EOS termination
-    bool    truncate_batch  = false; // Truncate batch to block_end (vs full sequence)
+    int32_t max_length        = 0;     // Maximum sequence length
+    bool    eos_early_stop    = false; // Enable early EOS termination
+    bool    truncate_batch    = false; // Truncate batch to block_end (vs full sequence)
+    bool    hybrid_diffusion  = false; // Enable hybrid diffusion optimization with KV cache
 };
 
 struct callback_data {
@@ -287,6 +288,24 @@ static void diffusion_generate(llama_context *          ctx,
     int64_t time_start          = ggml_time_us();
 
     bool all_tokens_filled = false;
+
+    // Hybrid Diffusion: Pre-fill prompt if enabled and n_input > 0
+    if (params.hybrid_diffusion && n_input > 0) {
+        // Decode prompt (0..n_input) to KV cache
+        batch.n_tokens = n_input;
+        for (int32_t i = 0; i < n_input; i++) {
+            batch.token[i]     = output_tokens[i];
+            batch.pos[i]       = i;
+            batch.n_seq_id[i]  = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i]    = false; // No logits needed for prompt
+        }
+        
+        if (llama_decode(ctx, batch) != 0) {
+            LOG_ERR("%s: failed to decode prompt\n", __func__);
+            return;
+        }
+    }
     for (int block_num = 0; block_num < num_blocks && !all_tokens_filled; block_num++) {
         int32_t block_start = (params.schedule == BLOCK_BASED) ? n_input + block_num * params.block_length : 0;
         int32_t block_end   = (params.schedule == BLOCK_BASED) ?
@@ -316,21 +335,62 @@ static void diffusion_generate(llama_context *          ctx,
 
             // Setup batch
             int32_t batch_size;
-            if (params.truncate_batch) {
-                // Truncate to block_end to avoid attending to future blocks
-                batch_size = block_end;
+            int32_t batch_start_pos;
+            
+            // Hybrid Diffusion: Commit previous block to KV cache
+            if (params.hybrid_diffusion && block_num > 0 && step == 0) {
+                int32_t prev_block_start = (params.schedule == BLOCK_BASED) ? n_input + (block_num - 1) * params.block_length : 0;
+                int32_t prev_block_end   = block_start;
+                
+                int32_t pb_size = prev_block_end - prev_block_start;
+                if (pb_size > 0) {
+                    batch.n_tokens = pb_size;
+                    for (int32_t i = 0; i < pb_size; i++) {
+                        int32_t pos = prev_block_start + i;
+                        batch.token[i]     = output_tokens[pos];
+                        batch.pos[i]       = pos;
+                        batch.n_seq_id[i]  = 1;
+                        batch.seq_id[i][0] = 0;
+                        batch.logits[i]    = false; 
+                    }
+                    
+                    // Remove old KV for this range to ensure we write the fresh finalized tokens
+                    llama_memory_seq_rm(llama_get_memory(ctx), 0, prev_block_start, prev_block_end);
+                    
+                    if (llama_decode(ctx, batch) != 0) {
+                        LOG_ERR("%s: failed to commit previous block %d\n", __func__, block_num - 1);
+                        break;
+                    }
+                }
+            }
+
+            if (params.hybrid_diffusion && params.truncate_batch) {
+                // Hybrid Diffusion: Truncate to active block only
+                batch_start_pos = block_start;
+                batch_size      = block_end - block_start;
+            } else if (params.truncate_batch) {
+                // Legacy: Truncate to block_end
+                batch_start_pos = 0;
+                batch_size      = block_end;
             } else {
                 // Process full sequence
-                batch_size = params.max_length;
+                batch_start_pos = 0;
+                batch_size      = params.max_length;
+            }
+            
+            // Hybrid Diffusion: Remove old KV for the active region before re-decoding
+            if (params.hybrid_diffusion) {
+                llama_memory_seq_rm(llama_get_memory(ctx), 0, batch_start_pos, batch_start_pos + batch_size);
             }
             
             batch.n_tokens = batch_size;
             for (int32_t i = 0; i < batch_size; i++) {
-                batch.token[i]     = output_tokens[i];
-                batch.pos[i]       = i;
+                int32_t pos = batch_start_pos + i;
+                batch.token[i]     = output_tokens[pos];
+                batch.pos[i]       = pos;
                 batch.n_seq_id[i]  = 1;
                 batch.seq_id[i][0] = 0;
-                batch.logits[i]    = 1;
+                batch.logits[i]    = true;
             }
 
             float * logits = nullptr;
@@ -350,8 +410,9 @@ static void diffusion_generate(llama_context *          ctx,
                     un_x_buffer[i] = params.mask_token_id;
                 }
 
-                for (int32_t i = 0; i < params.max_length; i++) {
-                    batch.token[i] = un_x_buffer[i];
+                for (int32_t i = 0; i < batch_size; i++) {
+                    int32_t pos = batch_start_pos + i;
+                    batch.token[i] = un_x_buffer[pos];
                 }
                 ret = llama_decode(ctx, batch);
                 if (ret != 0) {
@@ -381,10 +442,17 @@ static void diffusion_generate(llama_context *          ctx,
             }
 
             auto get_logits_for_pos = [&](int32_t pos) -> const float * {
-                if (params.shift_logits) {
-                    return pos == 0 ? logits : logits + (pos - 1) * n_vocab;
+                // Hybrid Diffusion: Map absolute pos to relative pos in logits
+                int32_t rel_pos = params.hybrid_diffusion ? (pos - batch_start_pos) : pos;
+                
+                if (params.hybrid_diffusion && (pos < batch_start_pos || pos >= batch_start_pos + batch_size)) {
+                    return nullptr; // Position out of active batch range
                 }
-                return logits + (pos) *n_vocab;
+               
+                if (params.shift_logits) {
+                    return rel_pos == 0 ? logits : logits + (rel_pos - 1) * n_vocab;
+                }
+                return logits + (rel_pos) * n_vocab;
             };
 
             int64_t time_start_sampling = ggml_time_us();
@@ -758,7 +826,17 @@ int main(int argc, char ** argv) {
     } else {
         // Default to false for backward compatibility
         diff_params.truncate_batch = false;
-    }  
+    }
+    
+    // Read hybrid_diffusion parameter from GGUF metadata
+    char hybrid_diffusion_str[8];
+    if (llama_model_meta_val_str(model, "diffusion.hybrid_diffusion", hybrid_diffusion_str, sizeof(hybrid_diffusion_str)) >= 0) {
+        diff_params.hybrid_diffusion = (strcmp(hybrid_diffusion_str, "true") == 0);
+        LOG_INF("Hybrid Diffusion: %s\n", diff_params.hybrid_diffusion ? "ENABLED" : "DISABLED");
+    } else {
+        // Default to false for backward compatibility
+        diff_params.hybrid_diffusion = false;
+    }
         
     //Use either eps or block length, but not both
     GGML_ASSERT((params.diffusion.eps == 0) ^ (params.diffusion.block_length == 0));
