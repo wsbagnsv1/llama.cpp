@@ -66,7 +66,6 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
     const int half = WARP_SIZE;
     const int nrows_low = (n < half) ? n : half;
 
-    // Process lower rows
 #pragma unroll
     for (int row = 0; row < nrows_low; ++row) {
         float sum = 0.0f;
@@ -82,7 +81,6 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
         }
     }
 
-    // Process upper rows
 #pragma unroll
     for (int row = half; row < n; ++row) {
         float sum = fmaf(sA[row * n + lane], x_low, 0.0f);
@@ -100,7 +98,6 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
         }
     }
 
-    // Warp-wise store
 #pragma unroll 2
     for (int rr = 0; rr < 2; ++rr) {
         int row = rr * WARP_SIZE + lane;
