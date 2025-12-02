@@ -42,9 +42,9 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
     const int64_t i02     = i02_i03.y;
     const int64_t i03     = i02_i03.x;
 
-    const float * const A_batch = (const float *) ((const char *) A + i02 * nb02 + i03 * nb03);
-    const float * const B_batch = (const float *) ((const char *) B + i02 * nb12 + i03 * nb13);
-    float *             X_batch = (float *) ((char *) X + i02 * nb2 + i03 * nb3);
+    const float * const A_batch = (const float *) (A + i02 * nb02 + i03 * nb03);
+    const float * const B_batch = (const float *) (B + i02 * nb12 + i03 * nb13);
+    float *             X_batch = (float *) (X + i02 * nb2 + i03 * nb3);
 
     __shared__ float sA[MAX_N_FAST * MAX_N_FAST];
 
@@ -197,6 +197,7 @@ void ggml_cuda_op_solve_tri(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
     GGML_ASSERT(k <= 32);
 
     solve_tri_f32_cuda((const float *) src0->data, (const float *) src1->data, (float *) dst->data, n, k, src0->ne[2],
-                       src0->ne[3], src0->nb[2], src0->nb[3], src1->nb[2], src1->nb[3], dst->nb[2], dst->nb[3],
-                       ctx.stream());
+                       src0->ne[3], src0->nb[2] / sizeof(float), src0->nb[3] / sizeof(float),
+                       src1->nb[2] / sizeof(float), src1->nb[3] / sizeof(float), dst->nb[2] / sizeof(float),
+                       dst->nb[3] / sizeof(float), ctx.stream());
 }
