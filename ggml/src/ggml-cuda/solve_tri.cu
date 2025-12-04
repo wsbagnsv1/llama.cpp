@@ -83,10 +83,10 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
 
 #pragma unroll
     for (int row = half; row < n; ++row) {
-        float sum = fmaf(sA[row * n + lane], x_low, 0.0f);
+        float sum = sA[row * n + lane] * x_low;
         const int j = half + lane;
         if (j < row) {
-            sum = fmaf(sA[row * n + j], x_high, sum);
+            sum += sA[row * n + j] * x_high;
         }
         sum = warp_reduce_sum(sum);
 
