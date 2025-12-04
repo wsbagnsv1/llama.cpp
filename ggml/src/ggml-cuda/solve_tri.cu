@@ -52,7 +52,7 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
 
 #pragma unroll
     for (int i = 0; i < n * n; i += k * WARP_SIZE) {
-        int i0 = i + offset;
+        const int i0 = i + offset;
         if (i0 < n * n) {
             sA[i0] = A_batch[i0];
         }
@@ -75,8 +75,8 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
         sum = warp_reduce_sum(sum);
 
         if (lane == row) {
-            float diag = sA[row * n + row];
-            float idiv = 1.0f / diag;
+            const float diag = sA[row * n + row];
+            const float idiv = 1.0f / diag;
             x_low = fmaf(sum, -idiv, x_low * idiv);
         }
     }
@@ -84,7 +84,7 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
 #pragma unroll
     for (int row = half; row < n; ++row) {
         float sum = fmaf(sA[row * n + lane], x_low, 0.0f);
-        int j = half + lane;
+        const int j = half + lane;
         if (j < row) {
             sum = fmaf(sA[row * n + j], x_high, sum);
         }
@@ -97,9 +97,9 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
 
 #pragma unroll
     for (int rr = 0; rr < 2; ++rr) {
-        int row = rr * WARP_SIZE + lane;
+        const int row = rr * WARP_SIZE + lane;
         if (row < n) {
-            float val = (row < half) ? x_low : x_high;
+            const float val = (row < half) ? x_low : x_high;
             X_batch[row * k + col_idx] = val;
         }
     }
