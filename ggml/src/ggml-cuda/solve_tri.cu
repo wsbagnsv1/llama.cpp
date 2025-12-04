@@ -75,9 +75,7 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
         sum = warp_reduce_sum(sum);
 
         if (lane == row) {
-            const float diag = sA[row * n + row];
-            const float idiv = 1.0f / diag;
-            x_low = fmaf(sum, -idiv, x_low * idiv);
+            x_low = (x_low - sum) / sA[row * n + row];
         }
     }
 
