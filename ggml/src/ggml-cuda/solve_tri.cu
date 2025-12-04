@@ -98,7 +98,7 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
         }
     }
 
-#pragma unroll 2
+#pragma unroll
     for (int rr = 0; rr < 2; ++rr) {
         int row = rr * WARP_SIZE + lane;
         if (row < n) {
