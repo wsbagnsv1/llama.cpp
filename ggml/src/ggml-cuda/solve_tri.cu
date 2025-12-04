@@ -90,11 +90,8 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
         }
         sum = warp_reduce_sum(sum);
 
-        int updater = row - half;
-        if (lane == updater) {
-            float diag = sA[row * n + row];
-            float idiv = 1.0f / diag;
-            x_high = fmaf(sum, -idiv, x_high * idiv);
+        if (lane == row - half) {
+            x_high = (x_high - sum) / sA[row * n + row];
         }
     }
 
