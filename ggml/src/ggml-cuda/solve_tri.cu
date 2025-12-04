@@ -70,7 +70,7 @@ static __global__ void solve_tri_f32_fast(const float * __restrict__ A,
     for (int row = 0; row < nrows_low; ++row) {
         float sum = 0.0f;
         if (lane < row) {
-            sum = fmaf(sA[row * n + lane], x_low, sum);
+            sum += sA[row * n + lane] * x_low;
         }
         sum = warp_reduce_sum(sum);
 
